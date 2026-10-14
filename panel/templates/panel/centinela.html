@@ -1,0 +1,622 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CENTINELA · Monitor UPS</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="{% static 'css/styles.css' %}">
+</head>
+<body x-data="centinelaApp" :data-theme="theme">
+<div id="bgfx"><span></span><span></span><span></span></div>
+
+<!-- ============ LOGIN ============ -->
+<div id="login-screen" x-show="screen === 'login'">
+  <button class="theme-fab" id="loginThemeFab" aria-label="Cambiar tema" title="Cambiar tema" @click="toggleTheme()">
+    <svg id="loginThemeIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <template x-if="isDark">
+        <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+      </template>
+      <template x-if="!isDark">
+        <g><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></g>
+      </template>
+    </svg>
+  </button>
+  <svg class="pulse-bg" viewBox="0 0 1200 700" preserveAspectRatio="none">
+    <path class="pulse-line" d="M-20,500 L180,500 L210,380 L240,600 L270,320 L300,500 L520,500 L550,420 L580,540 L610,500 L900,500 L930,400 L960,560 L990,460 L1020,500 L1240,500"/>
+  </svg>
+  <div class="login-card">
+    <div class="login-brand">
+      <div class="mark"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2"><path d="M13 2 4 14h6l-1 8 9-12h-6l1-8z"/></svg></div>
+      <span>CENTINELA</span>
+    </div>
+    <p class="login-sub">Monitor de energía UPS · acceso al panel de control</p>
+
+    <div class="login-error" id="loginError" :class="{ 'show': !!loginError }">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><path d="M12 8v5M12 16h.01"/></svg>
+      <span id="loginErrorText" x-text="loginError || 'Ingresa un usuario y una contraseña para continuar.'">Ingresa un usuario y una contraseña para continuar.</span>
+    </div>
+
+    <form id="loginForm" @submit.prevent="submitLogin()">
+      {% csrf_token %}
+      <div class="field">
+        <label for="loginUser">Usuario</label>
+        <input id="loginUser" type="text" placeholder="Ingrese nombre de usuario..." autocomplete="username" x-model="credentials.username">
+      </div>
+      <div class="field">
+        <label for="loginPass">Contraseña</label>
+        <input id="loginPass" type="password" placeholder="••••••••" autocomplete="current-password" x-model="credentials.password">
+      </div>
+      <div class="field-row">
+        <label class="checkbox-wrap"><input type="checkbox" checked> Recordarme</label>
+        <a href="#" class="link-muted" onclick="return false;">¿Olvidaste tu clave?</a>
+      </div>
+      <button type="submit" class="btn btn-primary" id="loginBtn" :disabled="loginLoading">
+        <span class="spinner" id="loginSpinner" :class="{ 'on': loginLoading }"></span>
+        <span id="loginBtnText" x-text="loginLoading ? 'Verificando…' : 'Ingresar'">Ingresar</span>
+      </button>
+    </form>
+  </div>
+</div>
+
+<!-- ============ PRELOADER ============ -->
+<div id="preloader" x-show="screen === 'boot'" x-cloak>
+  <div class="boot-ring">
+    <svg viewBox="0 0 80 80">
+      <circle class="track" cx="40" cy="40" r="35"></circle>
+      <circle class="bar" id="bootBar" cx="40" cy="40" r="35" stroke-dasharray="219.9" :stroke-dashoffset="bootStrokeOffset"></circle>
+    </svg>
+    <div class="boot-mark" id="bootPct" x-text="bootPct + '%'">0%</div>
+  </div>
+  <div class="boot-label">Iniciando Centinela</div>
+  <div class="boot-log" id="bootLog" x-html="bootLog">Estableciendo sesión<b>...</b></div>
+</div>
+
+<!-- ============ APP ============ -->
+<div id="app" x-show="screen === 'app'" x-cloak>
+  <nav class="topbar">
+    <!-- Lado Izquierdo: Brand + Contexto Dinámico -->
+    <div class="topbar-left">
+      <div class="brand" @click="setView('panel')" style="cursor:pointer;" title="Ir al panel de flota">
+        <div class="mark"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2"><path d="M13 2 4 14h6l-1 8 9-12h-6l1-8z"/></svg></div>
+        <span>CENTINELA</span>
+      </div>
+
+      <!-- Estado A: Si está a nivel general (Panel Principal o Configuración de Flota) -->
+      <div class="nav-links" x-show="isGlobalView">
+        <button class="nav-link" :class="{ 'active': currentView === 'panel' }" @click="setView('panel')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+          <span>Panel principal</span>
+        </button>
+        <button class="nav-link admin-only" x-show="user && user.is_admin" :class="{ 'active': currentView === 'config' }" @click="setView('config')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.55-1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34H9a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87V9a1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.55 1z"/></svg>
+          <span>Configuración</span>
+        </button>
+      </div>
+
+      <!-- Estado B: Si está dentro de una UPS (Monitor, Histórico, Eventos, Config) -->
+      <template x-if="!isGlobalView">
+        <div class="nav-device-context">
+          <button type="button" class="btn-back-fleet" @click="setView('panel')" title="Regresar al panel principal">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+            <span>Panel principal</span>
+          </button>
+          <div class="nav-device-info">
+            <span class="dot" :class="{
+              'pulse': activeDeviceStatus === 'online',
+              'red pulse': activeDeviceStatus === 'battery',
+              'amber pulse': activeDeviceStatus === 'offline'
+            }"></span>
+            <span class="nav-device-name" x-text="selectedDevice.name">UPS1</span>
+            <span class="device-status-badge" :class="activeDeviceStatus" x-text="activeDeviceStatusLabel">En red</span>
+          </div>
+        </div>
+      </template>
+    </div>
+
+    <!-- Centro: Pestañas de la UPS seleccionada (SOLO aparecen al dar clic a una UPS) -->
+    <div class="nav-links" x-show="!isGlobalView" x-cloak>
+      <button class="nav-link" :class="{ 'active': currentView === 'monitor' }" @click="setView('monitor')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h4l2-8 4 16 2-8h6"/></svg> Monitor
+      </button>
+      <button class="nav-link" :class="{ 'active': currentView === 'historico' }" @click="setView('historico')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="M7 15l4-5 3 3 5-7"/></svg> Histórico
+      </button>
+      <button class="nav-link" :class="{ 'active': currentView === 'eventos' }" @click="setView('eventos')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h10"/></svg> Eventos
+      </button>
+      <button class="nav-link admin-only" x-show="user && user.is_admin" :class="{ 'active': currentView === 'device-config' }" @click="setView('device-config')" id="navConfigBtn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.55-1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34H9a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87V9a1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.55 1z"/></svg> Configuración
+      </button>
+    </div>
+
+    <!-- Lado Derecho: Usuario, Tema y Salir -->
+    <div class="nav-right">
+      <div class="status-chip" id="topUserChip">
+        <span id="topUserIcon" x-text="user && user.is_admin ? '🛡️' : '👁️'">👤</span>
+        <span id="topUserName" x-text="user ? (user.name || user.username) : 'Usuario'">Usuario</span> ·
+        <span id="topUserRole" x-text="user ? user.role : 'Admin'" style="color:var(--text-dim);">Admin</span>
+      </div>
+
+      <button class="icon-btn" id="themeToggle" aria-label="Cambiar tema" title="Cambiar tema" @click="toggleTheme()">
+        <svg id="themeIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <template x-if="isDark">
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+          </template>
+          <template x-if="!isDark">
+            <g><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></g>
+          </template>
+        </svg>
+      </button>
+
+      <button class="icon-btn" id="logoutBtn" aria-label="Cerrar sesión" title="Cerrar sesión" @click="logout()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>
+      </button>
+    </div>
+  </nav>
+
+  <main>
+    <!-- SIMULACIÓN DEMO -->
+    <div class="simbar admin-only" x-show="user && user.is_admin" id="simOutageBar">
+      <label class="switch"><input type="checkbox" id="simOutage" :checked="telemetry.onBattery" @change="toggleOutage($event.target.checked)"><span class="slider"></span></label>
+      <span><b>Modo demostración:</b> simular corte de red eléctrica para ver el comportamiento de alarmas.</span>
+    </div>
+
+    <!-- ===================== PANEL PRINCIPAL ===================== -->
+    <section class="view" id="view-panel" x-show="currentView === 'panel'">
+      <div class="page-head">
+        <div>
+          <h1>Panel principal de UPS</h1>
+          <p>Panorama general de las unidades registradas</p>
+        </div>
+        <div class="page-head-actions">
+          <button type="button" class="btn-primary-action admin-only" x-show="user && user.is_admin" @click="openDeviceModal()">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
+            <span>Registrar nueva UPS</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- KPI ROW REACTIVO -->
+      <div class="kpi-row" id="kpiRow">
+        <div class="kpi-card">
+          <div class="kpi-icon blue"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg></div>
+          <div><div class="kpi-num mono" x-text="kpis.total"></div><div class="kpi-label">UPS registradas</div></div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-icon red"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2 4 14h6l-1 8 9-12h-6l1-8z"/></svg></div>
+          <div><div class="kpi-num mono" x-text="kpis.enBateria"></div><div class="kpi-label">En batería ahora</div></div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-icon amber"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v5M12 16h.01"/></svg></div>
+          <div><div class="kpi-num mono" x-text="kpis.alertas"></div><div class="kpi-label">Alertas activas</div></div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-icon green"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6 9 17l-5-5"/></svg></div>
+          <div><div class="kpi-num mono" x-text="kpis.enLinea"></div><div class="kpi-label">En línea normal</div></div>
+        </div>
+      </div>
+
+      <!-- TOOLBAR BUSCADOR Y FILTROS -->
+      <div class="fleet-toolbar">
+        <input id="fleetSearch" placeholder="Buscar por nombre o ubicación..." x-model="fleetSearch">
+        <div class="seg" id="fleetFilterSeg">
+          <button :class="{ active: fleetFilter === 'todas' }" @click="fleetFilter = 'todas'">Todas</button>
+          <button :class="{ active: fleetFilter === 'battery' }" @click="fleetFilter = 'battery'">En batería</button>
+          <button :class="{ active: fleetFilter === 'alert' }" @click="fleetFilter = 'alert'">Con alertas</button>
+          <button :class="{ active: fleetFilter === 'offline' }" @click="fleetFilter = 'offline'">Desconectadas</button>
+        </div>
+      </div>
+
+      <!-- CUADRÍCULA DE TARJETAS FLOTA -->
+      <div class="fleet-grid" id="fleetGrid">
+        <template x-if="filteredFleet.length === 0">
+          <div class="fleet-empty">
+            <p>No hay UPS que coincidan con el filtro.</p>
+            <button type="button" class="btn-primary-action admin-only" x-show="user && user.is_admin" style="margin-top:12px;" @click="openDeviceModal()">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
+              <span>Registrar nueva UPS</span>
+            </button>
+          </div>
+        </template>
+        <template x-for="f in filteredFleet" :key="f.id">
+          <div class="fleet-card" :class="f.status" @click="selectDevice(f)">
+            <div class="fc-top">
+              <span class="fc-name" x-text="f.name"></span>
+              <span class="dot" :class="{ 'pulse': f.status === 'online', 'red pulse': f.status === 'battery', 'amber pulse': f.status === 'offline' }"
+                    :style="'background:' + (f.status === 'online' ? 'var(--green)' : (f.status === 'battery' ? 'var(--red)' : 'var(--amber)'))"></span>
+            </div>
+            <div class="fc-loc" x-text="f.loc"></div>
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-top:8px;">
+              <span class="fc-badge" :class="f.status"
+                    x-text="f.status === 'online' ? 'Red eléctrica' : (f.status === 'battery' ? 'En batería' : 'Sin comunicación')"></span>
+              <span class="mono" style="font-size:0.75rem; color:var(--text-dim); font-weight:600;" :title="'Tiempo en estado: ' + getDeviceDuration(f)" x-text="getDeviceDuration(f)">00:00:00</span>
+            </div>
+
+            <template x-if="f.status === 'offline'">
+              <div class="fc-offline-msg">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><circle cx="12" cy="12" r="10"/><path d="M12 8v5M12 16h.01"/></svg> Sin comunicación con el ESP32
+              </div>
+            </template>
+
+            <template x-if="f.status !== 'offline'">
+              <div>
+                <div class="fc-stat"><span>Carga</span><b class="mono" x-text="f.load + '%'"></b></div>
+                <div class="g-bar">
+                  <div class="g-bar-fill" :style="'width:' + f.load + '%; background:' + (f.status === 'battery' ? 'var(--red)' : 'var(--purple)')"></div>
+                </div>
+                <div class="fc-stat"><span>Batería</span><b class="mono" x-text="f.battery + '%'"></b></div>
+                <div class="g-bar">
+                  <div class="g-bar-fill" :style="'width:' + f.battery + '%; background:' + (f.battery < 20 ? 'var(--red)' : 'var(--green)')"></div>
+                </div>
+              </div>
+            </template>
+          </div>
+        </template>
+
+        <!-- TARJETA PARA REGISTRAR NUEVA UPS -->
+        <div class="fleet-card add-card admin-only" x-show="user && user.is_admin" @click="openDeviceModal()" title="Registrar una nueva UPS en la red">
+          <div class="add-card-content">
+            <div class="add-card-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
+            </div>
+            <span class="add-card-title">Registrar nueva UPS</span>
+            <span class="add-card-sub">Conectar nuevo ESP32 a la red</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== MONITOR ===================== -->
+    <section class="view" id="view-monitor" x-show="currentView === 'monitor'" x-cloak>
+      <div class="page-head">
+        <div>
+          <h1>Monitor en tiempo real</h1>
+          <p>Lecturas eléctricas de la UPS vía ESP32 · protocolo Megatec</p>
+        </div>
+      </div>
+
+      <div class="identity-bar" :class="{ 'alarm': activeDeviceStatus === 'battery', 'offline-alarm': activeDeviceStatus === 'offline' }" id="identityBar">
+        <div class="identity-left">
+          <div>
+            <h2 id="upsName" x-text="selectedDevice.name">UPS-Servidores-01</h2>
+            <div class="loc" id="upsLoc" x-text="selectedDevice.loc">Sala de servidores · 192.168.1.50:4196</div>
+          </div>
+          <div class="identity-badge" :class="activeDeviceStatus === 'battery' ? 'battery' : (activeDeviceStatus === 'offline' ? 'offline' : 'online')" id="identityBadge">
+            <span class="dot" :class="activeDeviceStatus === 'battery' ? 'red pulse' : (activeDeviceStatus === 'offline' ? 'gray' : 'pulse')" id="identityDot"></span> <span id="identityText" x-text="activeDeviceStatus === 'battery' ? 'Funcionando en batería' : (activeDeviceStatus === 'offline' ? 'Sin comunicación' : 'Red eléctrica')">Red eléctrica</span>
+          </div>
+        </div>
+        <div class="identity-right">
+          <div><span x-text="statusTimerLabel">En red hace</span> <span class="val mono" id="upTime" x-text="uptime">00:00:00</span></div>
+          <div>Última lectura <span class="val mono" id="lastRead" x-text="telemetry.lastReadText">hace 1s</span></div>
+        </div>
+      </div>
+
+      <div class="grid-gauges" id="gaugeGrid">
+        <div class="gauge-card hero">
+          <div class="g-label">Carga de la UPS</div>
+          <div class="g-value"><span id="gCarga" x-text="Math.round(telemetry.load)">45</span><span class="g-unit">%</span></div>
+          <div class="g-sub">Potencia entregada a la carga conectada</div>
+          <div class="g-bar"><div class="g-bar-fill" id="gCargaBar" :style="'width:' + telemetry.load + '%; background:' + cargaColor"></div></div>
+        </div>
+        <div class="gauge-card hero">
+          <div class="g-label">Batería</div>
+          <div class="g-value"><span id="gBateria" x-text="Math.round(telemetry.battery)">100</span><span class="g-unit">%</span></div>
+          <div class="g-sub" id="gBateriaSub" x-text="batterySubtitle">Autonomía estimada: 34 min</div>
+          <div class="g-ring">
+            <svg viewBox="0 0 40 40">
+              <circle class="track" cx="20" cy="20" r="16"></circle>
+              <circle class="bar" id="ringBateria" cx="20" cy="20" r="16" stroke-dasharray="100.5" :stroke-dashoffset="batteryStrokeOffset" :style="'stroke:' + (activeDeviceStatus === 'offline' ? 'var(--text-faint)' : (telemetry.battery < 20 ? 'var(--red)' : 'var(--green)'))"></circle>
+            </svg>
+          </div>
+        </div>
+        <div class="gauge-card">
+          <div class="g-label">V. Entrada</div>
+          <div class="g-value"><span id="gVin" x-text="telemetry.vin.toFixed(1)">120.4</span><span class="g-unit">V</span></div>
+          <div class="g-sub">Nominal 115–125V</div>
+        </div>
+        <div class="gauge-card">
+          <div class="g-label">V. Salida</div>
+          <div class="g-value"><span id="gVout" x-text="telemetry.vout.toFixed(1)">120.1</span><span class="g-unit">V</span></div>
+          <div class="g-sub">Nominal 115–125V</div>
+        </div>
+        <div class="gauge-card">
+          <div class="g-label">Frecuencia</div>
+          <div class="g-value"><span id="gHz" x-text="telemetry.hz.toFixed(1)">60.0</span><span class="g-unit">Hz</span></div>
+          <div class="g-sub">Nominal 59.5–60.5Hz</div>
+        </div>
+        <div class="gauge-card">
+          <div class="g-label">Temperatura</div>
+          <div class="g-value"><span id="gTemp" x-text="telemetry.temp.toFixed(1)">28.4</span><span class="g-unit">°C</span></div>
+          <div class="g-sub">Interna del banco de baterías</div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h3>Estado del protocolo (Q1 · Megatec)</h3>
+          <span class="sub">8 indicadores de estado en tiempo real</span>
+        </div>
+        <div class="panel-body">
+          <div class="bitmask-row" id="bitmaskRow">
+            <template x-for="b in bitLabels" :key="b.key">
+              <div class="bit-chip" :class="{ 'on': isBitActive(b.key), 'warn': isBitActive(b.key) && b.key === 'b' }">
+                <span class="led"></span>
+                <span class="name" x-text="b.name"></span>
+              </div>
+            </template>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h3>Acciones rápidas</h3>
+          <span class="sub">Comandos hacia el ESP32</span>
+        </div>
+        <div class="panel-body">
+          <div class="actions-row">
+            <button class="action-btn" disabled><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M12 18v4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M2 12h4M18 12h4M4.9 19.1l2.8-2.8M16.3 7.7l2.8-2.8"/></svg> Prueba de batería (autotest)</button>
+            <button class="action-btn" disabled><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg> Silenciar beeper</button>
+            <button class="action-btn" disabled><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18.4 6.6a9 9 0 1 1-12.8 0"/><path d="M12 2v8"/></svg> Reinicio programado</button>
+          </div>
+          <div class="action-note">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
+            Deshabilitadas: el firmware actual del ESP32 solo transmite lecturas, aún no acepta comandos entrantes.
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== HISTÓRICO ===================== -->
+    <section class="view" id="view-historico" x-show="currentView === 'historico'" x-cloak>
+      <div class="page-head">
+        <div>
+          <h1>Histórico y tendencias</h1>
+          <p>Calidad de energía a lo largo del tiempo · <span style="display:inline-flex; align-items:center; gap:5px; color:var(--green); font-weight:500;"><span class="dot pulse" style="width:6px; height:6px;"></span> En caliente (3s)</span></p>
+        </div>
+        <div class="seg" id="rangeSeg">
+          <button :class="{ active: currentRange === '1h' }" data-range="1h" @click="setRange('1h')">1H</button>
+          <button :class="{ active: currentRange === '24h' }" data-range="24h" @click="setRange('24h')">24H</button>
+          <button :class="{ active: currentRange === '7d' }" data-range="7d" @click="setRange('7d')">7D</button>
+          <button :class="{ active: currentRange === '30d' }" data-range="30d" @click="setRange('30d')">30D</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h3>Voltaje: entrada vs. salida</h3><span class="sub">V</span></div>
+        <div class="panel-body">
+          <div class="chart-legend">
+            <span class="legend-item"><span class="legend-dot" style="background:var(--red)"></span>Entrada</span>
+            <span class="legend-item"><span class="legend-dot" style="background:var(--blue)"></span>Salida</span>
+          </div>
+          <div class="chart-wrap"><canvas id="chartVoltageCanvas"></canvas></div>
+          <div class="stat-row" id="statsVoltage"></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h3>Carga de la UPS</h3><span class="sub">%</span></div>
+        <div class="panel-body">
+          <div class="chart-wrap"><canvas id="chartLoadCanvas"></canvas></div>
+          <div class="stat-row" id="statsLoad"></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h3>Temperatura interna</h3><span class="sub">°C</span></div>
+        <div class="panel-body">
+          <div class="chart-wrap"><canvas id="chartTempCanvas"></canvas></div>
+          <div class="stat-row" id="statsTemp"></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h3>Curva de batería</h3><span class="sub">% de carga — se tiñe de rojo durante cortes</span></div>
+        <div class="panel-body">
+          <div class="chart-wrap"><canvas id="chartBatteryCanvas"></canvas></div>
+          <div class="stat-row" id="statsBattery"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== EVENTOS ===================== -->
+    <section class="view" id="view-eventos" x-show="currentView === 'eventos'" x-cloak>
+      <div class="page-head">
+        <div>
+          <h1>Registro de eventos</h1>
+          <p>Historial auditable de la UPS y su enlace con el ESP32 · <span style="display:inline-flex; align-items:center; gap:5px; color:var(--green); font-weight:500;"><span class="dot pulse" style="width:6px; height:6px;"></span> En caliente</span></p>
+        </div>
+        <div style="display:flex; gap:8px;">
+          <button class="btn-ghost" id="exportCsv" @click="exportCsv()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/></svg> Exportar CSV</button>
+          <button class="btn-ghost" id="exportPdf" @click="exportPdf()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 2h9l5 5v15H6z"/><path d="M15 2v5h5"/></svg> Exportar PDF</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <div class="seg" id="filterSeg">
+            <button :class="{ active: eventFilter === 'todos' }" @click="eventFilter = 'todos'">Todos</button>
+            <button :class="{ active: eventFilter === 'battery' }" @click="eventFilter = 'battery'">Modo batería</button>
+            <button :class="{ active: eventFilter === 'comm' }" @click="eventFilter = 'comm'">Desconexiones</button>
+            <button :class="{ active: eventFilter === 'info' }" @click="eventFilter = 'info'">Alertas</button>
+          </div>
+          <span class="sub" id="eventCount" x-text="filteredEvents.length + ' eventos'">— eventos</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Tipo</th><th>Inicio</th><th>Fin</th><th>Duración</th><th>Detalle</th></tr></thead>
+            <tbody id="eventsBody">
+              <template x-if="filteredEvents.length === 0">
+                <tr><td colspan="5" style="text-align:center; color:var(--text-faint); padding:26px;">Sin eventos para este filtro.</td></tr>
+              </template>
+              <template x-for="(e, idx) in filteredEvents" :key="idx">
+                <tr>
+                  <td><span class="tag" :class="e.tipo" x-text="e.label"></span></td>
+                  <td class="mono" x-text="fmtDate(e.inicio)"></td>
+                  <td class="mono" x-text="e.fin ? fmtDate(e.fin) : '—'"></td>
+                  <td class="mono" x-text="e.dur"></td>
+                  <td style="white-space:normal; color:var(--text-dim);" x-text="e.detalle"></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== CONFIGURACIÓN DE RED Y DISPOSITIVOS (VISTA APARTE) ===================== -->
+    <section class="view" id="view-config" x-show="currentView === 'config'" x-cloak>
+      <div class="page-head">
+        <div>
+          <h1>Configuración del sistema</h1>
+          <p>Dispositivos registrados en la red y control de direccionamiento</p>
+        </div>
+        <div class="page-head-actions">
+          <button type="button" class="btn-primary-action admin-only" x-show="user && user.is_admin" @click="openDeviceModal()">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
+            <span>Registrar nueva UPS</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- PANEL PRINCIPAL: Dispositivos Registrados en la Red -->
+      <div class="panel">
+        <div class="panel-head">
+          <div>
+            <h3>Dispositivos Registrados en la Red</h3>
+            <span class="sub" x-text="devices.length + ' equipos configurados en el servidor'"></span>
+          </div>
+          <button class="btn-ghost admin-only" x-show="user && user.is_admin" @click="openDeviceModal()">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg> Agregar UPS
+          </button>
+        </div>
+        <div class="panel-body">
+          <div class="table-wrap">
+            <table class="config-table">
+              <thead>
+                <tr>
+                  <th>Equipo</th>
+                  <th>Ubicación</th>
+                  <th>Dirección IP : Puerto</th>
+                  <th>Estado</th>
+                  <th style="text-align:right;">Acciones</th>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-for="d in devices" :key="d.id || d.name">
+                  <tr>
+                    <td>
+                      <div class="table-device-name">
+                        <span class="dot" :class="{ 'pulse': d.status === 'online', 'red pulse': d.status === 'battery', 'amber': d.status === 'offline' }"></span>
+                        <b x-text="d.name"></b>
+                      </div>
+                    </td>
+                    <td style="color:var(--text-dim);" x-text="d.loc || '—'"></td>
+                    <td class="mono" x-text="d.ip"></td>
+                    <td>
+                      <span class="fc-badge" :class="d.status || 'online'"
+                            x-text="(d.status === 'online' ? 'En red' : (d.status === 'battery' ? 'En batería' : 'Sin enlace'))"></span>
+                    </td>
+                    <td style="text-align:right;">
+                      <div style="display:inline-flex; gap:6px;">
+                        <button type="button" class="btn-table-action" @click="selectDevice(d)" title="Abrir monitor de esta UPS">
+                          <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h4l2-8 4 16 2-8h6"/></svg>
+                          Monitor
+                        </button>
+                        <button type="button" class="btn-table-action" @click="openDeviceDetailsConfig(d)" title="Ver y editar parámetros de esta UPS">
+                          <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                          Detalles
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== CONFIGURACIÓN DE LA UPS ESPECÍFICA (DESDE SUS DETALLES) ===================== -->
+    <section class="view" id="view-device-config" x-show="currentView === 'device-config'" x-cloak>
+      <div class="page-head">
+        <div>
+          <h1>Parámetros de <span x-text="selectedDevice.name"></span></h1>
+          <p>Ajuste de conexión y umbrales eléctricos de la unidad seleccionada</p>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h3 x-text="selectedDevice.name">UPS-Servidores-01</h3>
+          <span class="sub">Editar parámetros</span>
+        </div>
+        <div class="panel-body">
+          <form id="configForm" @submit.prevent="saveQuickConfig()">
+            <div class="form-grid">
+              <div class="form-field"><label>Nombre de la UPS</label><input id="cfgName" x-model="quickConfig.name"></div>
+              <div class="form-field"><label>Ubicación</label><input id="cfgLoc" x-model="quickConfig.loc"></div>
+              <div class="form-field"><label>Dirección IP</label><input id="cfgIp" x-model="quickConfig.ip"></div>
+              <div class="form-field"><label>Puerto TCP</label><input id="cfgPort" x-model="quickConfig.port"></div>
+              <div class="form-field"><label>Voltaje mínimo tolerable (V)</label><input id="cfgVmin" x-model="quickConfig.vmin"></div>
+              <div class="form-field"><label>Voltaje máximo tolerable (V)</label><input id="cfgVmax" x-model="quickConfig.vmax"></div>
+              <div class="form-field"><label>Batería crítica (%)</label><input id="cfgBatCrit" x-model="quickConfig.batCrit"></div>
+              <div class="form-field"><label>Intervalo de lectura (s)</label><input id="cfgInterval" x-model="quickConfig.interval"></div>
+            </div>
+            <div class="form-actions">
+              <button type="button" class="btn-ghost" @click="resetQuickConfig()">Cancelar</button>
+              <button type="submit" class="btn-solid">Guardar cambios</button>
+            </div>
+          </form>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h3>Estado del enlace ESP32</h3>
+          <span class="sub mono" id="pingVal">Latencia: 24ms</span>
+        </div>
+        <div class="panel-body">
+          <div class="bitmask-row">
+            <div class="bit-chip on"><span class="led"></span><span class="name">Socket TCP activo</span></div>
+            <div class="bit-chip on"><span class="led"></span><span class="name">HELLO respondido</span></div>
+            <div class="bit-chip"><span class="led"></span><span class="name">Reconexión pendiente</span></div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div id="toast-host"></div>
+
+<!-- add device modal -->
+<div class="modal-backdrop" id="modalBackdrop" x-show="modalDeviceOpen" x-cloak @keydown.escape.window="closeDeviceModal()">
+  <div class="modal" @click.outside="closeDeviceModal()">
+    <div class="modal-head">
+      <h3>Agregar nueva UPS</h3>
+      <button type="button" class="modal-close" @click="closeDeviceModal()" aria-label="Cerrar modal">&times;</button>
+    </div>
+    <div class="form-grid">
+      <div class="form-field"><label>Nombre</label><input id="newDevName" placeholder="UPS-Oficina-Cali" x-model="newDevice.name"></div>
+      <div class="form-field"><label>Ubicación</label><input id="newDevLoc" placeholder="Oficina Cali" x-model="newDevice.loc"></div>
+      <div class="form-field"><label>Dirección IP</label><input id="newDevIp" placeholder="192.168.1.51" x-model="newDevice.ip"></div>
+      <div class="form-field"><label>Puerto TCP</label><input id="newDevPort" placeholder="7660" x-model="newDevice.port"></div>
+    </div>
+    <div class="form-actions">
+      <button type="button" class="btn-ghost" id="modalCancel" @click="closeDeviceModal()">Cancelar</button>
+      <button type="button" class="btn-solid" id="modalSave" @click="saveNewDevice()">Agregar</button>
+    </div>
+  </div>
+</div>
+<script src="{% static 'js/chart.min.js' %}"></script>
+<script src="{% static 'js/graficas.js' %}?v=3"></script>
+<script src="{% static 'js/scripts.js' %}?v=3"></script>
+<script defer src="{% static 'js/alpine.min.js' %}"></script>
+</body>
+</html>

@@ -53,6 +53,14 @@ class UPSDevice(models.Model):
         choices=STATUS_CHOICES,
     )
 
+    status_changed_at = models.DateTimeField(
+        default = timezone.now,
+        null = True,
+        blank = True,
+        verbose_name = "Inicio del estado actual",
+        help_text = "Fecha y hora en que la UPS cambió a su estado actual"
+    )
+
     battery_nominal = models.FloatField(
         default = 12.0,
         verbose_name = "Voltaje nominal (V)",

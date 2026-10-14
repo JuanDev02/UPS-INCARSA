@@ -8,7 +8,13 @@ from django.core.management.base import BaseCommand
 from django.utils import timezone
 from django.db import connection
 
-from monitoreo.models import UPSDevice, TelemetryLog, PowerEvent
+from panel.models import UPSDevice, TelemetryLog, PowerEvent
+
+
+# Constantes de conexión y latido (sincronizadas con el nuevo firmware del ESP32)
+PING_INTERVAL = 15          # Segundos entre PING al ESP32
+RESPONSE_TIMEOUT = 45       # Si el ESP32 no responde en este tiempo (ni PONG ni datos), reconectar
+RECONNECT_DELAY = 3         # Segundos antes de reintentar conexión
 
 
 # ==============================================================================
@@ -20,13 +26,14 @@ class UPSWorker(threading.Thread):
     Hilo encargado de conectarse por TCP a un solo ESP32/UPS,
     leer su telemetría y guardar los datos en la base de datos de Django.
     """
-    def __init__(self, device_id, name, host, port, time_connection=5):
+    def __init__(self, device_id, name, host, port, time_connection=RECONNECT_DELAY, log_interval=60):
         super().__init__(daemon=True)
         self.device_id = device_id
         self.name = name
         self.host = host
         self.port = int(port)
         self.time_connection = time_connection
+        self.log_interval = log_interval  # Guardar en TelemetryLog cada 60s por defecto
 
         self.stop_event = threading.Event()  # Indicador para pedir al hilo detenerse
 
@@ -35,6 +42,8 @@ class UPSWorker(threading.Thread):
         self.battery_start = None
         self.event_currentBattery = None
         self.readings = 0
+        self.last_telemetry_save = 0  # Timestamp del último registro guardado en TelemetryLog
+        self.last_state_update = 0    # Timestamp de última actualización en UPSDevice
 
     def log(self, message):
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -56,14 +65,21 @@ class UPSWorker(threading.Thread):
         try:
             device = UPSDevice.objects.filter(id=self.device_id).first()
             if device:
-                device.status = status
+                update_fields = ["last_seen"]
                 device.last_seen = timezone.now()
+                if device.status != status:
+                    device.status = status
+                    device.status_changed_at = timezone.now()
+                    update_fields.extend(["status", "status_changed_at"])
+                elif not device.status_changed_at:
+                    device.status_changed_at = timezone.now()
+                    update_fields.append("status_changed_at")
+
                 if battery_voltage is not None:
                     device.battery_voltage = battery_voltage
-                device.save(
-                    update_fields=["status", "last_seen", "battery_voltage"]
-                    if battery_voltage is not None else ["status", "last_seen"]
-                )
+                    update_fields.append("battery_voltage")
+
+                device.save(update_fields=list(set(update_fields)))
         except Exception as e:
             self.log(f"Error actualizando UPSDevice: {e}")
         finally:
@@ -154,37 +170,86 @@ class UPSWorker(threading.Thread):
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(10.0)
+
+                # Keepalive del sistema operativo para detectar enlaces caídos
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                if hasattr(socket, "TCP_KEEPIDLE"):
+                    try:
+                        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 20)
+                        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 5)
+                        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+                    except Exception:
+                        pass
+
+                self.log(f"Conectando a {self.host}:{self.port}...")
                 sock.connect((self.host, self.port))
-                self.log("Conectado exitosamente con ESP32.")
-                self.stateDevice_UPDATE(status='online')
+                self.log("CONEXIÓN TCP EXITOSA. Esperando telemetría inicial...")
+                try:
+                    device = UPSDevice.objects.filter(id=self.device_id).first()
+                    if device:
+                        device.last_seen = timezone.now()
+                        device.save(update_fields=["last_seen"])
+                except Exception:
+                    pass
 
                 # Saludo inicial al ESP32
                 try:
                     sock.sendall(b"HELLO\n")
-                except Exception:
-                    pass
+                    self.log("HELLO enviado al ESP32. Esperando telemetría (llega cada ~60s)...")
+                except Exception as e:
+                    self.log(f"Aviso enviando HELLO: {e}")
 
-                buffer = b""
+                # Timeout corto de lectura (1s) para poder emitir PING cada 15s sin quedar bloqueados
+                sock.settimeout(1.0)
 
-                # Bucle de lectura de datos
+                ultimo_rx = time.time()
+                ultimo_ping = time.time()
+                buffer = ""
+
+                # Bucle de recepción y latido continuo
                 while not self.stop_event.is_set():
+                    ahora = time.time()
+
+                    # 1. Enviar latido PING hacia el ESP32 cada 15s
+                    if ahora - ultimo_ping >= PING_INTERVAL:
+                        try:
+                            sock.sendall(b"PING\n")
+                            ultimo_ping = ahora
+                        except Exception as e:
+                            raise ConnectionError(f"Fallo enviando PING al ESP32: {e}")
+
+                    # 2. Si el ESP32 no responde nada (ni PONG ni datos) en 45s -> conexión muerta
+                    if ahora - ultimo_rx > RESPONSE_TIMEOUT:
+                        raise TimeoutError(f"Sin respuesta del ESP32 en {RESPONSE_TIMEOUT}s. Reconectando...")
+
+                    # 3. Leer datos del socket con timeout de 1s
                     try:
-                        data = sock.recv(4096)
-                        if not data:
+                        datos = sock.recv(4096)
+                        if not datos:
                             raise ConnectionError("El ESP32 cerró la conexión TCP.")
 
-                        buffer += data
+                        ultimo_rx = time.time()
+                        buffer += datos.decode("utf-8", errors="ignore")
 
-                        while b"\n" in buffer:
-                            line_bytes, buffer = buffer.split(b"\n", 1)
-                            line = line_bytes.decode("utf-8", errors="ignore").strip()
+                        while "\n" in buffer:
+                            linea, buffer = buffer.split("\n", 1)
+                            linea = linea.strip()
 
-                            if not line or line in ("ESP32_READY", "TCP_READY"):
+                            if not linea:
+                                continue
+
+                            # Respuesta al latido (PONG): conexión activa y saludable
+                            if linea == "PONG":
+                                continue
+
+                            # Mensajes de saludo/control del ESP32
+                            if linea in ("ESP32_READY", "TCP_READY"):
                                 continue
 
                             try:
-                                dataS = json.loads(line)
+                                dataS = json.loads(linea)
                             except json.JSONDecodeError:
+                                self.log(f"Mensaje ignorado (no JSON): {linea}")
                                 continue
 
                             # Detectar eventos de desconexión / reconexión de la UPS con el ESP32
@@ -201,16 +266,45 @@ class UPSWorker(threading.Thread):
                             # Procesar medición válida
                             self.readings += 1
                             new_mode = self.batteryMode_DETECTED(dataS)
+                            mode_changed = (new_mode != self.battery_mode)
                             self.chanceEnergy_PROCCESS(new_mode)
-                            self.telemetry_SAVE(dataS)
 
-                            if self.readings % 20 == 0:
-                                v_in = dataS.get('entrada') or dataS.get('enter')
-                                v_out = dataS.get('salida') or dataS.get('exit')
-                                v_bat = dataS.get('bateria') or dataS.get('battery')
-                                self.log(f"Telemetría activa ({self.readings} lecturas). Vin={v_in}V, Vout={v_out}V, Bat={v_bat}V")
+                            now_ts = time.time()
+                            # Guardar en TelemetryLog cada log_interval (o inmediato si cambió el modo)
+                            if mode_changed or (now_ts - self.last_telemetry_save >= self.log_interval):
+                                self.telemetry_SAVE(dataS)
+                                self.last_telemetry_save = now_ts
+                                self.last_state_update = now_ts
+                            elif now_ts - self.last_state_update >= 5:
+                                # Mantiene viva la última lectura y estado en UPSDevice sin saturar el historial
+                                battery = float(dataS.get("bateria") or dataS.get("battery", 0))
+                                self.stateDevice_UPDATE(
+                                    status='battery' if self.battery_mode else 'online',
+                                    battery_voltage=battery
+                                )
+                                self.last_state_update = now_ts
+
+                            v_in = dataS.get('entrada') or dataS.get('enter')
+                            v_out = dataS.get('salida') or dataS.get('exit')
+                            try:
+                                v_bat = float(dataS.get('bateria') or dataS.get('battery') or 0)
+                            except (ValueError, TypeError):
+                                v_bat = 0.0
+
+                            # Porcentaje basado en 2.30V (100%) y corte en 1.75V (0%)
+                            if 0 < v_bat <= 3.5:
+                                bat_pct = int(min(100, max(0, round(((v_bat - 1.75) / (2.30 - 1.75)) * 100))))
+                                bat_str = f"{v_bat:.2f}V ({bat_pct}%)"
+                            else:
+                                bat_str = f"{v_bat}V"
+
+                            modo_str = "Batería" if self.battery_mode else "Red"
+                            self.log(f"Telemetría #{self.readings} recibida: Vin={v_in}V, Vout={v_out}V, Bat={bat_str}, Modo={modo_str}")
+
                     except socket.timeout:
+                        # Timeout normal de 1s para permitir evaluar el latido PING y stop_event
                         continue
+
             except Exception as e:
                 self.log(f"Desconectado ({e}). Reintentando en {self.time_connection}s...")
                 self.stateDevice_UPDATE(status='offline')
@@ -240,8 +334,17 @@ class UPSWorker(threading.Thread):
 class Command(BaseCommand):
     help = "Monitorea continuamente en paralelo todas las UPS activas en la BD"
 
+    def add_arguments(self, parser):
+        parser.add_argument(
+            '--interval',
+            type=int,
+            default=60,
+            help='Intervalo en segundos para guardar registros en TelemetryLog (por defecto: 60s)'
+        )
+
     def handle(self, *args, **options):
-        self.stdout.write(self.style.SUCCESS("=== INICIANDO SERVICIO MULTI-UPS ==="))
+        log_interval = options.get('interval', 60)
+        self.stdout.write(self.style.SUCCESS(f"=== INICIANDO SERVICIO MULTI-UPS (Guardado en BD cada {log_interval}s) ==="))
 
         workers = {}
 
@@ -264,6 +367,9 @@ class Command(BaseCommand):
                             self.stdout.write(self.style.WARNING(f"Configuración cambiada para {ups.name}. Reiniciando worker..."))
                             current_worker.stop()
                             needStart = True
+                        elif not current_worker.is_alive():
+                            self.stdout.write(self.style.WARNING(f"Worker para {ups.name} se detuvo inesperadamente. Reiniciando..."))
+                            needStart = True
 
                     if needStart:
                         self.stdout.write(self.style.MIGRATE_HEADING(f"Levantando worker para {ups.name} ({ups.host}:{ups.port})"))
@@ -271,7 +377,8 @@ class Command(BaseCommand):
                             device_id=ups.id,
                             name=ups.name,
                             host=ups.host,
-                            port=ups.port
+                            port=ups.port,
+                            log_interval=log_interval
                         )
                         w.start()
                         workers[ups.id] = (w, ups.host, int(ups.port))

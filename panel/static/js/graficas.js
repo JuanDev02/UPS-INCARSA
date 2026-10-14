@@ -55,12 +55,39 @@
       '<div class="stat-chip"><div class="k">Máximo</div><div class="v mono">'+max.toFixed(1)+unit+'</div></div>';
   }
 
-  function createOrUpdateChart(canvasId, config){
-    if(chartInstances[canvasId]){
-      chartInstances[canvasId].destroy();
-    }
+  function renderDirectStats(containerId, s, unit){
+    const el = document.getElementById(containerId);
+    if(!el || !s) return;
+    el.innerHTML =
+      '<div class="stat-chip"><div class="k">Mínimo</div><div class="v mono">'+(s.min !== undefined ? s.min.toFixed(1) : '—')+unit+'</div></div>'+
+      '<div class="stat-chip"><div class="k">Promedio</div><div class="v mono">'+(s.avg !== undefined ? s.avg.toFixed(1) : '—')+unit+'</div></div>'+
+      '<div class="stat-chip"><div class="k">Máximo</div><div class="v mono">'+(s.max !== undefined ? s.max.toFixed(1) : '—')+unit+'</div></div>';
+  }
+
+  function createOrUpdateChart(canvasId, config, isLive = false){
     const canvas = document.getElementById(canvasId);
     if(!canvas || typeof Chart === 'undefined') return null;
+
+    if(chartInstances[canvasId]){
+      const chart = chartInstances[canvasId];
+      chart.data.labels = config.data.labels;
+      config.data.datasets.forEach((newDs, idx) => {
+        if(chart.data.datasets[idx]){
+          chart.data.datasets[idx].data = newDs.data;
+          chart.data.datasets[idx].label = newDs.label;
+          chart.data.datasets[idx].borderColor = newDs.borderColor;
+          chart.data.datasets[idx].backgroundColor = newDs.backgroundColor;
+          chart.data.datasets[idx].pointRadius = newDs.pointRadius;
+          chart.data.datasets[idx].pointHoverRadius = newDs.pointHoverRadius;
+        } else {
+          chart.data.datasets.push(newDs);
+        }
+      });
+      chart.data.datasets.splice(config.data.datasets.length);
+      chart.update(isLive ? 'none' : undefined);
+      return chart;
+    }
+
     const ctx = canvas.getContext('2d');
     chartInstances[canvasId] = new Chart(ctx, config);
     return chartInstances[canvasId];
@@ -70,6 +97,9 @@
     return {
       responsive: true,
       maintainAspectRatio: false,
+      animation: {
+        duration: 350
+      },
       interaction: {
         mode: 'index',
         intersect: false
@@ -137,15 +167,57 @@
     return labels;
   }
 
-  function renderHistorico(range){
+  let isFetchingHistorico = false;
+
+  async function renderHistorico(range, deviceId, isLive = false){
+    if(isFetchingHistorico) return;
+    isFetchingHistorico = true;
+
     currentRange = range || currentRange || '1h';
-    const n = rangePoints[currentRange], seed = rangeSeeds[currentRange];
-    const labels = genTimeLabels(currentRange, n);
     const colors = getThemeColors();
 
+    let labels = null;
+    let vin = null;
+    let vout = null;
+    let load = null;
+    let temp = null;
+    let batt = null;
+    let stats = null;
+
+    // Intentar consultar datos reales de la API REST /api/historico/
+    try {
+      const devId = deviceId || (window.__centinelaApp?.selectedDevice?.id) || '';
+      const url = devId ? `/api/dispositivos/${devId}/historico/?range=${currentRange}` : `/api/historico/?range=${currentRange}`;
+      const res = await fetch(url);
+      const json = await res.json();
+      if(json.ok && json.data && Array.isArray(json.data.labels) && json.data.labels.length > 0){
+        labels = json.data.labels.slice();
+        vin = json.data.vin.slice();
+        vout = json.data.vout.slice();
+        load = json.data.load.slice();
+        temp = json.data.temp.slice();
+        batt = json.data.battery.slice();
+        stats = json.stats;
+      }
+    } catch(e) {}
+    finally {
+      isFetchingHistorico = false;
+    }
+
+    // Fallback con series simuladas si no hay registros o falla la conexión
+    if(!labels || labels.length === 0){
+      const n = rangePoints[currentRange], seed = rangeSeeds[currentRange];
+      labels = genTimeLabels(currentRange, n);
+      vin = genSeries(seed, n, 120, 4, 2.2);
+      vout = genSeries(seed+1, n, 120, 2, 1.2);
+      load = genSeries(seed+2, n, 46, 18, 6);
+      temp = genSeries(seed+3, n, 29, 5, 1.5);
+      batt = genSeries(seed+4, n, 92, 14, 5).map(v=>clamp(v,0,100));
+    }
+
+    const radius = labels.length > 20 ? 0 : 2;
+
     // 1. Gráfica de Voltaje (Entrada vs Salida)
-    const vin = genSeries(seed, n, 120, 4, 2.2);
-    const vout = genSeries(seed+1, n, 120, 2, 1.2);
     createOrUpdateChart('chartVoltageCanvas', {
       type: 'line',
       data: {
@@ -158,7 +230,7 @@
             backgroundColor: 'transparent',
             borderWidth: 2,
             tension: 0.35,
-            pointRadius: 0,
+            pointRadius: radius,
             pointHoverRadius: 6,
             pointHoverBackgroundColor: colors.red
           },
@@ -169,18 +241,22 @@
             backgroundColor: 'transparent',
             borderWidth: 2,
             tension: 0.35,
-            pointRadius: 0,
+            pointRadius: radius,
             pointHoverRadius: 6,
             pointHoverBackgroundColor: colors.blue
           }
         ]
       },
       options: getCommonChartOptions('V', colors)
-    });
-    renderStats('statsVoltage', vin.concat(vout), 'V');
+    }, isLive);
+
+    if(stats?.voltage){
+      renderDirectStats('statsVoltage', stats.voltage, 'V');
+    } else {
+      renderStats('statsVoltage', vin.concat(vout), 'V');
+    }
 
     // 2. Gráfica de Carga (%)
-    const load = genSeries(seed+2, n, 46, 18, 6);
     createOrUpdateChart('chartLoadCanvas', {
       type: 'line',
       data: {
@@ -193,17 +269,21 @@
           fill: true,
           borderWidth: 2,
           tension: 0.35,
-          pointRadius: 0,
+          pointRadius: radius,
           pointHoverRadius: 6,
           pointHoverBackgroundColor: colors.purple
         }]
       },
       options: getCommonChartOptions('%', colors)
-    });
-    renderStats('statsLoad', load, '%');
+    }, isLive);
+
+    if(stats?.load){
+      renderDirectStats('statsLoad', stats.load, '%');
+    } else {
+      renderStats('statsLoad', load, '%');
+    }
 
     // 3. Gráfica de Temperatura (°C)
-    const temp = genSeries(seed+3, n, 29, 5, 1.5);
     createOrUpdateChart('chartTempCanvas', {
       type: 'line',
       data: {
@@ -216,17 +296,21 @@
           fill: true,
           borderWidth: 2,
           tension: 0.35,
-          pointRadius: 0,
+          pointRadius: radius,
           pointHoverRadius: 6,
           pointHoverBackgroundColor: colors.amber
         }]
       },
       options: getCommonChartOptions('°C', colors)
-    });
-    renderStats('statsTemp', temp, '°C');
+    }, isLive);
+
+    if(stats?.temp){
+      renderDirectStats('statsTemp', stats.temp, '°C');
+    } else {
+      renderStats('statsTemp', temp, '°C');
+    }
 
     // 4. Gráfica de Batería (%)
-    const batt = genSeries(seed+4, n, 92, 14, 5).map(v=>clamp(v,0,100));
     createOrUpdateChart('chartBatteryCanvas', {
       type: 'line',
       data: {
@@ -239,14 +323,19 @@
           fill: true,
           borderWidth: 2,
           tension: 0.35,
-          pointRadius: 0,
+          pointRadius: radius,
           pointHoverRadius: 6,
           pointHoverBackgroundColor: colors.green
         }]
       },
       options: getCommonChartOptions('%', colors)
-    });
-    renderStats('statsBattery', batt, '%');
+    }, isLive);
+
+    if(stats?.battery){
+      renderDirectStats('statsBattery', stats.battery, '%');
+    } else {
+      renderStats('statsBattery', batt, '%');
+    }
   }
 
   // Inicializar listeners del selector de rango

@@ -47,7 +47,7 @@ class Migration(migrations.Migration):
                 ('temperature', models.FloatField(default=0.0, verbose_name='Temperatura (°C)')),
                 ('status_q1', models.CharField(default='00000000', max_length=8, verbose_name='Estado Q1')),
                 ('mode', models.CharField(choices=[('grid', 'Red eléctrica'), ('battery', 'Batería')], default='grid', max_length=25, verbose_name='Modo de operación')),
-                ('device', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, to='monitoreo.upsdevice')),
+                ('device', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, to='panel.upsdevice')),
             ],
             options={
                 'verbose_name': 'Lectura de telemetría',
@@ -66,7 +66,7 @@ class Migration(migrations.Migration):
                 ('duration_seconds', models.PositiveIntegerField(blank=True, null=True, verbose_name='Duración (segundos)')),
                 ('detail', models.TextField(verbose_name='Detalle del evento')),
                 ('notified', models.BooleanField(default=False, verbose_name='Notificación enviada')),
-                ('device', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='events', to='monitoreo.upsdevice', verbose_name='UPS')),
+                ('device', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='events', to='panel.upsdevice', verbose_name='UPS')),
             ],
             options={
                 'verbose_name': 'Evento eléctrico',
@@ -86,7 +86,7 @@ class Migration(migrations.Migration):
                 ('voltage_min_alert', models.FloatField(default=100.0, verbose_name='Voltaje Mínimo Alerta (V)')),
                 ('voltage_max_alert', models.FloatField(default=135.0, verbose_name='Voltaje Máximo Alerta (V)')),
                 ('load_max_alert', models.FloatField(default=85.0, verbose_name='Carga Máxima Alerta (%)')),
-                ('device', models.OneToOneField(blank=True, null=True, on_delete=django.db.models.deletion.CASCADE, related_name='alert_config', to='monitoreo.upsdevice', verbose_name='UPS (Vacío = Configuración Global)')),
+                ('device', models.OneToOneField(blank=True, null=True, on_delete=django.db.models.deletion.CASCADE, related_name='alert_config', to='panel.upsdevice', verbose_name='UPS (Vacío = Configuración Global)')),
             ],
             options={
                 'verbose_name': 'Configuración de Alertas',
