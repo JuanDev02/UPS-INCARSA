@@ -2,7 +2,8 @@ import json
 from datetime import datetime, timedelta
 from django.shortcuts import render
 from django.http import JsonResponse
-from django.contrib.auth import authenticate, login, logout
+from django.contrib.auth import authenticate, login, logout, update_session_auth_hash
+from django.contrib.auth.models import User
 from django.views.decorators.csrf import ensure_csrf_cookie, csrf_exempt
 from django.utils import timezone
 from django.db.models import Q
@@ -31,9 +32,11 @@ def api_login(request):
             data = json.loads(request.body)
             username = data.get('username', '').strip()
             password = data.get('password', '').strip()
+            remember = bool(data.get('remember', False))
         else:
             username = request.POST.get('username', '').strip()
             password = request.POST.get('password', '').strip()
+            remember = request.POST.get('remember') in ('true', '1', 'on', True)
 
         user = authenticate(request, username=username, password=password)
 
@@ -42,6 +45,13 @@ def api_login(request):
                 return JsonResponse({'ok': False, 'error': 'El usuario está desactivado.'}, status=403)
 
             login(request, user)
+
+            if remember:
+                # Sesión extendida de 30 días
+                request.session.set_expiry(60 * 60 * 24 * 30)
+            else:
+                # Expira al cerrar la ventana del navegador
+                request.session.set_expiry(0)
             is_admin = bool(user.is_superuser or user.is_staff)
 
             return JsonResponse({
@@ -86,33 +96,23 @@ def api_me(request):
     return JsonResponse({'authenticated': False})
 
 
-def calculate_battery_pct(battery_voltage, battery_nominal):
+def calculate_battery_pct(battery_voltage, battery_nominal=12.0):
     """
-    Estima el porcentaje de carga de la batería (0-100%).
-    
-    El protocolo Megatec Q1 envía la batería como 'Voltios por Celda' (ej. 2.28V - 2.31V/celda).
-    Una celda de plomo-ácido tiene:
-    - 2.27V a 2.30V/celda = 100% (voltaje de flotación conectada a la red)
-    - 2.00V/celda = ~50% (voltaje nominal en reposo)
-    - 1.75V/celda = 0% (voltaje de corte/descarga profunda)
-    
-    Esta función detecta automáticamente si el valor es por celda (<= 3.5V) o del banco total (> 3.5V)
-    y calcula el porcentaje real sobre la curva de descarga física.
+    Calcula el porcentaje de carga de la batería (0-100%).
+    Se toma 2.30V como la capacidad máxima (100%), por lo que cada 1% equivale a (2.30 / 100) = 0.023V.
+    Porcentaje = round((voltaje / 2.30) * 100).
     """
-    if not battery_voltage or not battery_nominal or battery_nominal <= 0:
-        return None
+    if not battery_voltage or battery_voltage <= 0:
+        return 0
 
     if battery_voltage <= 3.5:
-        # Medición por celda (estándar protocolo Megatec Q1, 2.30V = 100%)
-        v_min_cell = 1.75
-        v_max_cell = 2.30
-        pct = round(((battery_voltage - v_min_cell) / (v_max_cell - v_min_cell)) * 100)
+        # Medición directa por celda (2.30V = 100%)
+        pct = round((battery_voltage / 2.30) * 100)
     else:
-        # Medición por banco total
-        num_cells = max(1, round(battery_nominal / 2.0))
-        v_min_pack = num_cells * 1.75
-        v_max_pack = num_cells * 2.30
-        pct = round(((battery_voltage - v_min_pack) / (v_max_pack - v_min_pack)) * 100)
+        # Si se recibe el voltaje acumulado de todo el banco (ej. 6 celdas * 2.30V = 13.80V)
+        num_cells = max(1, round((battery_nominal or 12.0) / 2.0))
+        max_voltage = num_cells * 2.30
+        pct = round((battery_voltage / max_voltage) * 100)
 
     return int(min(100, max(0, pct)))
 
@@ -476,10 +476,16 @@ def api_Historico(request, device_id=None):
     })
 
 
-def format_event_duration(seconds):
-    """Retorna una cadena legible para la duración del evento (ej. '14m 20s' o 'En curso')."""
-    if seconds is None:
-        return 'En curso'
+def format_event_duration(seconds, event_type=None, ended_at=None):
+    """Retorna una cadena legible para la duración del evento (ej. '4m 45s', 'En curso' o '—')."""
+    if event_type == 'grid_restored':
+        return '—'
+    if seconds is None or seconds < 0:
+        if event_type in ('battery_mode', 'battery_low', 'esp_disconnect') and not ended_at:
+            return 'En curso'
+        return '—'
+    if seconds == 0:
+        return '< 1s' if event_type != 'grid_restored' else '—'
     if seconds < 60:
         return f"{seconds}s"
     minutes = seconds // 60
@@ -607,9 +613,9 @@ def api_Eventos(request, device_id=None):
             'severity': e.severity,
             'inicio': timezone.localtime(e.started_at).isoformat() if e.started_at else None,
             'fin': timezone.localtime(e.ended_at).isoformat() if e.ended_at else None,
-            'dur': format_event_duration(e.duration_seconds),
+            'dur': format_event_duration(e.duration_seconds, e.event_type, e.ended_at),
             'duration_seconds': e.duration_seconds,
-            'detalle': e.detail,
+            'detalle': e.detail or ('Restauración de red eléctrica' if e.event_type == 'grid_restored' else ('Corte de red detectado' if e.event_type == 'battery_mode' else 'Incidencia registrada')),
             'notified': e.notified,
         })
 
@@ -944,6 +950,104 @@ def api_AlertConfig(request, device_id=None):
             return JsonResponse({'ok': False, 'error': f'Error guardando configuración de alertas: {str(e)}'}, status=400)
 
     return JsonResponse({'ok': False, 'error': f'Método {request.method} no permitido.'}, status=405)
+
+
+@csrf_exempt
+def api_usuarios(request):
+    """
+    [API REST] Gestión de cuentas de usuario y credenciales (Admin y Supervisor).
+    Solo accesible para usuarios autenticados con privilegios de Administrador.
+    - GET: Lista todos los usuarios con su rol y último acceso.
+    - POST / PUT: Actualiza el nombre de usuario y/o contraseña de una cuenta.
+    """
+    if not request.user.is_authenticated or not (request.user.is_superuser or request.user.is_staff):
+        return JsonResponse({'ok': False, 'error': 'Acceso no autorizado. Se requieren privilegios de Administrador.'}, status=403)
+
+    if request.method == 'GET':
+        users = User.objects.all().order_by('id')
+        data = []
+        for u in users:
+            is_adm = bool(u.is_superuser or u.is_staff)
+            data.append({
+                'id': u.id,
+                'username': u.username,
+                'name': u.first_name or u.username,
+                'is_admin': is_adm,
+                'role': 'Administrador' if is_adm else 'Supervisor',
+                'is_active': u.is_active,
+                'last_login': timezone.localtime(u.last_login).strftime('%Y-%m-%d %H:%M') if u.last_login else 'Nunca',
+            })
+        return JsonResponse({'ok': True, 'users': data})
+
+    elif request.method in ('POST', 'PUT'):
+        try:
+            if request.content_type == 'application/json':
+                body = json.loads(request.body)
+            else:
+                body = request.POST
+
+            user_id = body.get('user_id')
+            target_role = body.get('role', '').lower().strip()
+            new_username = body.get('username', '').strip()
+            new_password = body.get('password', '').strip()
+
+            target_user = None
+            if user_id:
+                target_user = User.objects.filter(id=user_id).first()
+            elif target_role:
+                if target_role == 'administrador':
+                    target_user = User.objects.filter(Q(is_superuser=True) | Q(is_staff=True)).first()
+                else:
+                    target_user = User.objects.filter(is_superuser=False, is_staff=False).first()
+
+            if not target_user:
+                if not new_username:
+                    new_username = 'admin' if target_role == 'administrador' else 'supervisor'
+
+                is_admin_flag = (target_role == 'administrador')
+                target_user = User.objects.create_user(
+                    username=new_username,
+                    is_staff=is_admin_flag,
+                    is_superuser=is_admin_flag,
+                    first_name='Administrador' if is_admin_flag else 'Supervisor'
+                )
+
+            # Validar y actualizar username si cambió
+            if new_username and new_username != target_user.username:
+                if User.objects.filter(username=new_username).exclude(id=target_user.id).exists():
+                    return JsonResponse({'ok': False, 'error': f"El nombre de usuario '{new_username}' ya está en uso."}, status=400)
+                target_user.username = new_username
+
+            # Validar y actualizar contraseña si se suministró
+            if new_password:
+                if len(new_password) < 4:
+                    return JsonResponse({'ok': False, 'error': 'La contraseña debe tener al menos 4 caracteres.'}, status=400)
+                target_user.set_password(new_password)
+
+            target_user.save()
+
+            # Si el usuario modificó su propia contraseña, refrescar la sesión activa
+            if target_user.id == request.user.id and new_password:
+                update_session_auth_hash(request, target_user)
+
+            is_adm = bool(target_user.is_superuser or target_user.is_staff)
+            return JsonResponse({
+                'ok': True,
+                'message': f"Credenciales de {target_user.username} ({'Administrador' if is_adm else 'Supervisor'}) actualizadas correctamente.",
+                'user': {
+                    'id': target_user.id,
+                    'username': target_user.username,
+                    'name': target_user.first_name or target_user.username,
+                    'is_admin': is_adm,
+                    'role': 'Administrador' if is_adm else 'Supervisor',
+                    'is_active': target_user.is_active,
+                }
+            })
+        except Exception as e:
+            return JsonResponse({'ok': False, 'error': f'Error al actualizar usuario: {str(e)}'}, status=400)
+
+    return JsonResponse({'ok': False, 'error': f'Método {request.method} no permitido.'}, status=405)
+
 
 
 

@@ -9,6 +9,7 @@ urlpatterns = [
     path('api/logout/', views.api_logout, name='api_logout'),
     
     path('api/me/', views.api_me, name='api_me'),
+    path('api/usuarios/', views.api_usuarios, name='api_usuarios'),
     path('api/flota/', views.api_flota, name='api_flota'),
     path('api/dispositivos/', views.api_Dispositivos, name='api_dispositivos'),
     path('api/dispositivos/<int:device_id>/', views.api_Dispositivos, name='api_dispositivo_detail'),

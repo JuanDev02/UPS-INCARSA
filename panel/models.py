@@ -173,10 +173,10 @@ class PowerEvent(models.Model):
 
 
     EVENT_TYPE_CHOICES = [
-        ('battery_mode', 'Corte de luz'),
+        ('battery_mode', 'Corte de luz (Modo batería)'),
         ('grid_restored', 'Red eléctrica restaurada'),
-        ('esp_disconnect', 'Pérdida de comunicacion con ESP32'),
-        ('esp_reconnect', 'Reconexión con ESP32'),
+        ('esp_disconnect', 'Pérdida de conexión'),
+        ('esp_reconnect', 'Reconexión de equipo'),
         ('battery_low', 'Batería baja'),
         ('overload', 'Sobrecarga')
     ]

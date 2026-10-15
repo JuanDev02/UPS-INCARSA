@@ -189,7 +189,7 @@
          - Verificación automática de sesión existente ('/api/me/').
          - Cierre de sesión seguro ('/api/logout/').
          ------------------------------------------------------------------------ */
-      credentials: { username: '', password: '' },
+      credentials: { username: '', password: '', remember: true },
       loginError: '',
       loginLoading: false,
       user: null, // { username, name, role, is_admin }
@@ -215,11 +215,23 @@
               'Content-Type': 'application/json',
               'X-CSRFToken': getCsrfToken()
             },
-            body: JSON.stringify({ username: u, password: p })
+            body: JSON.stringify({
+              username: u,
+              password: p,
+              remember: !!this.credentials.remember
+            })
           });
           const data = await res.json();
 
           if(data.ok && data.user){
+            try {
+              if (this.credentials.remember) {
+                localStorage.setItem('centinela_remember_username', u);
+              } else {
+                localStorage.removeItem('centinela_remember_username');
+              }
+            } catch(e) {}
+
             this.user = data.user;
             this.startBoot(); // Inicia la animación de encendido
           } else {
@@ -293,6 +305,9 @@
           const data = await res.json();
           if(data.authenticated && data.user){
             this.user = data.user;
+            if(this.user.is_admin) {
+              this.fetchUsers();
+            }
             this.screen = 'app';
             this.initAppServices();
           }
@@ -331,6 +346,9 @@
         }
         this.currentView = view;
         this.mobileMenuOpen = false;
+        if(view === 'config' && this.user?.is_admin){
+          this.fetchUsers();
+        }
         if(view === 'historico' && typeof window.renderHistorico === 'function'){
           setTimeout(() => window.renderHistorico(this.currentRange, this.selectedDevice.id), 50);
         }
@@ -615,15 +633,37 @@
       },
 
       /**
+       * Calcula y formatea la autonomía según la capacidad total de la batería
+       * (1 hora y 30 minutos = 90 minutos de respaldo al 100%).
+       * @param {number} pct - Porcentaje de carga (0-100%).
+       */
+      formatAutonomy(pct) {
+        if(!pct || pct <= 0) return '0 min';
+        // 90 minutos totales al 100% de batería (1 hora y 30 minutos)
+        const totalMinutes = Math.max(1, Math.round((pct / 100) * 90));
+        if(totalMinutes < 60) {
+          return `${totalMinutes} min`;
+        }
+        const hours = Math.floor(totalMinutes / 60);
+        const mins = totalMinutes % 60;
+        return mins > 0 ? `${hours}h ${mins} min` : `${hours}h`;
+      },
+
+      /**
        * Getter computado: Subtítulo dinámico con estimación de autonomía de descarga.
        */
       get batterySubtitle() {
         if(this.activeDeviceStatus === 'offline' || this.telemetry.status === 'offline') {
           return 'Sin comunicación con la UPS';
         }
-        return this.telemetry.onBattery
-          ? ('Descargando · autonomía ~' + Math.max(1, Math.round(this.telemetry.battery * 0.42)) + ' min')
-          : 'En carga · autonomía estimada 34 min';
+        const pct = this.telemetry.battery || 0;
+        const autonomyText = this.formatAutonomy(pct);
+        if(this.telemetry.onBattery) {
+          return `Descargando · autonomía ~${autonomyText}`;
+        }
+        return pct >= 98
+          ? `Batería cargada · autonomía ~${autonomyText}`
+          : `En carga · autonomía estimada ~${autonomyText}`;
       },
 
       /**
@@ -736,15 +776,29 @@
       },
 
       /**
-       * Formatea fechas con día, mes, hora, minuto y segundo en formato Colombia.
+       * Formatea fechas y horas de forma clara, legible y profesional:
+       * Ejemplo: "14 Oct 2026, 04:05:48 PM"
        * @param {Date|string} d - Fecha a formatear.
        * @returns {string} Fecha formateada.
        */
       fmtDate(d) {
         if(!d) return '—';
         const dt = (d instanceof Date) ? d : new Date(d);
-        return dt.toLocaleDateString('es-CO', {day: '2-digit', month: '2-digit'}) + ' ' + 
-               dt.toLocaleTimeString('es-CO', {hour: '2-digit', minute: '2-digit', second: '2-digit'});
+        if(isNaN(dt.getTime())) return '—';
+
+        const day = dt.getDate().toString().padStart(2, '0');
+        const months = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
+        const month = months[dt.getMonth()];
+        const year = dt.getFullYear();
+
+        let hours = dt.getHours();
+        const minutes = dt.getMinutes().toString().padStart(2, '0');
+        const seconds = dt.getSeconds().toString().padStart(2, '0');
+        const ampm = hours >= 12 ? 'PM' : 'AM';
+        hours = hours % 12;
+        hours = hours ? hours.toString().padStart(2, '0') : '12';
+
+        return `${day} ${month} ${year}, ${hours}:${minutes}:${seconds} ${ampm}`;
       },
 
       /**
@@ -783,6 +837,10 @@
       devices: [{ id: 1, name: 'UPS-Servidores-01', loc: 'Sala de Servidores', ip: '192.168.1.50:7660', status: 'online' }],
       modalDeviceOpen: false,
       newDevice: { name: '', loc: '', ip: '', port: '7660' },
+      systemUsers: [],
+      modalUserOpen: false,
+      userSaving: false,
+      userEditForm: { id: null, role: '', username: '', password: '', password_confirm: '' },
       quickConfig: {
         name: 'UPS-Servidores-01',
         loc: 'Sala de servidores',
@@ -821,6 +879,89 @@
       closeDeviceModal() {
         this.modalDeviceOpen = false;
         this.newDevice = { name: '', loc: '', ip: '', port: '7660' };
+      },
+
+      async fetchUsers() {
+        if(!this.user?.is_admin) return;
+        try {
+          const res = await fetch('/api/usuarios/');
+          const data = await res.json();
+          if(data.ok && Array.isArray(data.users)) {
+            this.systemUsers = data.users;
+          }
+        } catch(e) {
+          console.warn('Error obteniendo usuarios:', e);
+        }
+      },
+
+      openUserModal(u) {
+        this.userEditForm = {
+          id: u.id,
+          role: u.role || (u.is_admin ? 'Administrador' : 'Supervisor'),
+          username: u.username,
+          password: '',
+          password_confirm: ''
+        };
+        this.modalUserOpen = true;
+      },
+
+      closeUserModal() {
+        this.modalUserOpen = false;
+        this.userEditForm = { id: null, role: '', username: '', password: '', password_confirm: '' };
+      },
+
+      async saveUserCredentials() {
+        const username = this.userEditForm.username.trim();
+        const pwd = this.userEditForm.password.trim();
+        const pwdConf = this.userEditForm.password_confirm.trim();
+
+        if(!username) {
+          toast('El nombre de usuario es obligatorio');
+          return;
+        }
+
+        if(pwd) {
+          if(pwd.length < 4) {
+            toast('La contraseña debe tener al menos 4 caracteres');
+            return;
+          }
+          if(pwd !== pwdConf) {
+            toast('Las contraseñas no coinciden');
+            return;
+          }
+        }
+
+        this.userSaving = true;
+        try {
+          const res = await fetch('/api/usuarios/', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-CSRFToken': getCsrfToken()
+            },
+            body: JSON.stringify({
+              user_id: this.userEditForm.id,
+              username: username,
+              password: pwd
+            })
+          });
+          const data = await res.json();
+          if(data.ok) {
+            toast(data.message || 'Credenciales actualizadas exitosamente');
+            this.closeUserModal();
+            await this.fetchUsers();
+            if(this.user && (this.user.username === this.userEditForm.username || this.user.id === this.userEditForm.id)) {
+              this.user.username = username;
+            }
+          } else {
+            toast(data.error || 'Error al actualizar credenciales');
+          }
+        } catch(e) {
+          console.error('Error guardando credenciales:', e);
+          toast('Error de red al actualizar credenciales');
+        } finally {
+          this.userSaving = false;
+        }
       },
 
       /**
@@ -940,6 +1081,47 @@
         toast('Edición cancelada');
       },
 
+      /**
+       * Elimina permanentemente una UPS registrada tras confirmación del usuario.
+       */
+      async deleteDevice(d) {
+        if(!d || !d.id) {
+          toast('No se especificó la UPS a eliminar');
+          return;
+        }
+        const devName = d.name || 'esta UPS';
+        const confirmDelete = window.confirm(`¿Estás seguro de que deseas eliminar permanentemente la UPS "${devName}"?\n\nEsta acción cancelará su monitoreo en segundo plano y desvinculará el equipo del sistema.`);
+        if(!confirmDelete) return;
+
+        try {
+          const res = await fetch(`/api/dispositivos/${d.id}/`, {
+            method: 'DELETE',
+            headers: {
+              'X-CSRFToken': getCsrfToken()
+            }
+          });
+          const data = await res.json();
+          if(data.ok) {
+            toast(data.message || `UPS "${devName}" eliminada`);
+            await this.fetchFleet();
+            // Si el dispositivo eliminado era el seleccionado, cambiar selección o volver al panel
+            if(this.selectedDevice && this.selectedDevice.id === d.id) {
+              if(this.devices.length > 0) {
+                this.selectDevice(this.devices[0]);
+              } else {
+                this.selectedDevice = { id: null, name: '', loc: '' };
+                this.setView('panel');
+              }
+            }
+          } else {
+            toast(data.error || 'Error al eliminar la UPS');
+          }
+        } catch(e) {
+          console.error('Error eliminando UPS:', e);
+          toast('Error de red al intentar eliminar la UPS');
+        }
+      },
+
 
       /* ------------------------------------------------------------------------
          [SECCIÓN 8] CICLO DE VIDA (LIFECYCLE) Y SERVICIOS PERIÓDICOS
@@ -954,6 +1136,16 @@
         window.__centinelaNav = this;
 
         if(this.theme) root.setAttribute('data-theme', this.theme);
+
+        // Prellenar nombre de usuario recordado
+        try {
+          const rememberedUser = localStorage.getItem('centinela_remember_username');
+          if (rememberedUser) {
+            this.credentials.username = rememberedUser;
+            this.credentials.remember = true;
+          }
+        } catch(e) {}
+
         this.events = seedEventsData();
         this.verifySession();
         this.fetchFleet();
@@ -972,6 +1164,8 @@
               id: d.id,
               name: d.name,
               loc: d.loc || d.location || '',
+              host: d.host || (d.ip ? d.ip.split(':')[0] : '—'),
+              port: String(d.port || (d.ip ? d.ip.split(':')[1] : '7660')),
               ip: `${d.host}:${d.port}`,
               status: d.status
             }));
@@ -989,6 +1183,8 @@
               id: d.id,
               name: d.name,
               loc: d.loc,
+              host: `192.168.1.${50 + d.id}`,
+              port: '7660',
               ip: `192.168.1.${50 + d.id}:7660`,
               status: d.status
             }));
@@ -1000,6 +1196,8 @@
               id: d.id,
               name: d.name,
               loc: d.loc,
+              host: `192.168.1.${50 + d.id}`,
+              port: '7660',
               ip: `192.168.1.${50 + d.id}:7660`,
               status: d.status
             }));
